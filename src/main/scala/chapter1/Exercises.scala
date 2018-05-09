@@ -1,5 +1,8 @@
 package chapter1
 
+import chapter1.Exercises.PriorityThreadPool
+import chapter1.Exercises.PriorityThreadPool.PriorityThreadPoolMultiple
+
 import scala.collection.mutable
 
 /**
@@ -133,7 +136,7 @@ object Exercises {
     // Main thread waiting for BetterReceiver and BetterProducer daemons to finish their task
     Thread.sleep(2000)
 
-    // Exercise 8
+    // Exercise 7
     val account1 = new Account("John", 1000)
     val account2 = new Account("John", 1000)
     val account3 = new Account("John", 1000)
@@ -147,6 +150,30 @@ object Exercises {
     t1.join()
     t2.join()
     t3.join()
+
+    // Results of Exercise 8
+    // Start the daemon thread that continuously polls if the tasks are in queue in the thread
+    // but remember, it isn't busy waiting rather it is just waiting!
+    PriorityThreadPool.Worker.start()
+
+    // Let us send a task aysnchronous to a priority thread pool. Remember a thread pool basically
+    // allows you to re-use OS threads for multiple tasks. We cannot spin up too many thread pools
+    // for each task.
+    PriorityThreadPool.asynchronous(1)(() => println("John"))
+
+    // Let the priority thread pool worker be running for 1000ms
+    Thread.sleep(1000)
+
+    // Results of Exercise 9
+    val pool = new PriorityThreadPoolMultiple.Pool(4)
+
+    PriorityThreadPoolMultiple.asynchronous(5)(() => println("This is multiple John with first priority"))
+    PriorityThreadPoolMultiple.asynchronous(2)(() => println("This is multiple multiple with third priority"))
+    PriorityThreadPoolMultiple.asynchronous(3)(() => println("This is multiple multiple with second priority"))
+    PriorityThreadPoolMultiple.asynchronous(1)(() => println("This is multiple multiple with fourth priority"))
+
+    // Give time for PriorityThreadPoolMultiple
+    Thread.sleep(1000)
   }
 
   // Exercise 1
@@ -305,7 +332,9 @@ object Exercises {
     }
   }
 
-  // Exercise 8
+  // Well, there is nothing wrong if you see a set of accounts with balance
+  // x1, x2 , x3 etc and by the time u click send button, those accounts may have zero balance and nothing is sent!
+  // That is concurrency.
   def sendAll(accounts: Set[Account], target: Account): Unit = {
     accounts.foreach { account => {
       if (account.uid > target.uid) account.synchronized {
@@ -322,6 +351,73 @@ object Exercises {
         }
       }
     }}
+  }
+
+  // Exercise 8
+  object PriorityThreadPool {
+    private val tasks = mutable.Queue[(() => Unit, Int)]()
+
+    object Worker extends Thread {
+      setDaemon(true)
+      def poll(): Unit = {
+        tasks.synchronized {
+          while (tasks.isEmpty) tasks.wait()
+          tasks.dequeueFirst(t => t == tasks.maxBy(_._2)) match {
+            case Some((task, _)) => println(s"Executed by thread ${Thread.currentThread().getName}"); task()
+            case None => tasks.wait()
+          }
+        }
+      }
+
+      override def run(): Unit = {
+        while(true) poll()
+      }
+    }
+
+    def asynchronous(priority: Int)(f: () => Unit): Unit = tasks.synchronized {
+      tasks.enqueue((f, priority))
+      tasks.notify()
+    }
+
+    // Exercise 9
+    // Extend the prioritytaskpool class from the previous exercise so that it supports
+    // any number of worker threads p. The parameter p is specified in the constructor of the prioritytaskpool
+    // class. This is one of the excellent step towards understanding Java's ForkJoinPool which is the underlying
+    // implementation of ExecutionContext.global in Scala (ExecutionContext can be considered as a Scala version
+    // of `Executor and ExecutorService` interface.
+    object PriorityThreadPoolMultiple {
+       private val tasks = mutable.Queue[(() => Unit, Int)]()
+
+      class Pool(n: Int) {
+        def worker = new Thread {
+          setDaemon(true)
+
+          def poll(): Unit = {
+            tasks.synchronized {
+              while (tasks.isEmpty) tasks.wait()
+              tasks.dequeueFirst(t => t == tasks.maxBy(_._2)) match {
+                case Some((task, _)) => println("Executed by thread " + Thread.currentThread().getName); task()
+                case None => tasks.wait()
+              }
+            }
+          }
+
+          override def run(): Unit = {
+            while (true) poll()
+          }
+        }
+
+        (0 until n).foreach(_ => worker.start())
+      }
+
+      // Start multiple threads that acts on tasks
+
+      def asynchronous(priority: Int)(f: () => Unit): Unit = tasks.synchronized {
+        tasks.enqueue((f, priority))
+        tasks.notify()
+      }
+    }
+
   }
 
   // A common function to start a thread
