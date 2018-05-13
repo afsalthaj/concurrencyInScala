@@ -165,7 +165,7 @@ object Exercises {
     Thread.sleep(1000)
 
     // Results of Exercise 9
-    val pool = new PriorityThreadPoolMultiple.Pool(4)
+    val pool = new PriorityThreadPoolMultiple.Pool(4, 3)
 
     PriorityThreadPoolMultiple.asynchronous(5)(() => println("This is multiple John with first priority"))
     PriorityThreadPoolMultiple.asynchronous(2)(() => println("This is multiple multiple with third priority"))
@@ -174,6 +174,9 @@ object Exercises {
 
     // Give time for PriorityThreadPoolMultiple
     Thread.sleep(1000)
+
+    // Exercise 10 result
+    pool.shutdown()
   }
 
   // Exercise 1
@@ -359,6 +362,7 @@ object Exercises {
 
     object Worker extends Thread {
       setDaemon(true)
+
       def poll(): Unit = {
         tasks.synchronized {
           while (tasks.isEmpty) tasks.wait()
@@ -370,7 +374,7 @@ object Exercises {
       }
 
       override def run(): Unit = {
-        while(true) poll()
+        while (true) poll()
       }
     }
 
@@ -379,25 +383,29 @@ object Exercises {
       tasks.notify()
     }
 
-    // Exercise 9
+    // Exercise 9 and Exercise 10
     // Extend the prioritytaskpool class from the previous exercise so that it supports
     // any number of worker threads p. The parameter p is specified in the constructor of the prioritytaskpool
     // class. This is one of the excellent step towards understanding Java's ForkJoinPool which is the underlying
     // implementation of ExecutionContext.global in Scala (ExecutionContext can be considered as a Scala version
     // of `Executor and ExecutorService` interface.
     object PriorityThreadPoolMultiple {
-       private val tasks = mutable.Queue[(() => Unit, Int)]()
+      private val tasks = mutable.Queue[(() => Unit, Int)]()
 
-      class Pool(n: Int) {
+      class Pool(n: Int, important: Int) {
+        var terminated = false
+
         def worker = new Thread {
           setDaemon(true)
 
           def poll(): Unit = {
             tasks.synchronized {
-              while (tasks.isEmpty) tasks.wait()
+              while (tasks.isEmpty && !terminated) tasks.wait()
               tasks.dequeueFirst(t => t == tasks.maxBy(_._2)) match {
-                case Some((task, _)) => println("Executed by thread " + Thread.currentThread().getName); task()
-                case None => tasks.wait()
+                case Some((task, _)) if !terminated => println("Executed by thread " + Thread.currentThread().getName); task()
+                case None if !terminated => tasks.wait()
+                case Some((task, p)) if terminated && p > important => task()
+                case _ => ()
               }
             }
           }
@@ -408,6 +416,10 @@ object Exercises {
         }
 
         (0 until n).foreach(_ => worker.start())
+
+        def shutdown(): Unit = {
+
+        }
       }
 
       // Start multiple threads that acts on tasks
@@ -420,8 +432,171 @@ object Exercises {
 
   }
 
+    // Exercise 11 -
+    // TODO; revisit, follow the logic of concurrent hashmap
+    //Implement a ConcurrentBiMap collection, which is a
+    // concurrent bidirectional map. The invariant is that every key is mapped to
+    // exactly one value, and vice versa. Operations must be atomic.
+    // The concurrent bidirectional map has the following interface:
+
+    trait ConcurrentBiMap[K, V] {
+      def put(k: K, v: V): Option[(K, V)]
+      def removeKey(k: K): Option[V]
+      def removeValue(v: V): Option[K]
+      def getValue(k: K): Option[V]
+      def getKey(v: V): Option[K]
+      def size: Int
+      def iterator: Iterator[(K, V)]
+      def replace(k1: K, v1: V, k2: K, v2: V): Unit
+
+    }
+
+    // A nasty solution by the way..but we know the concept.
+    class ConcurrentBiMapImpl[K, V] extends ConcurrentBiMap[K, V] {
+      val array: Array[Option[Entry]] = new Array[Option[Entry]](100)
+      for (p <- (0 until array.length)){
+        array(p) = None
+      }
+
+      trait Entry {
+        def key: K
+        def value: V
+        def index: Int
+      }
+
+      // We don't care segments as in original hashmap since we have only one key and one value
+      // and it should just stick on to one place in the original map
+      // Haha nasty hashCode impl...
+      private def findIndex(x: (K, V)) = {
+        val result = s"${x._1}${x._2}".hashCode()
+        result % array.size
+      }
+
+      // Only put is highly concurrent.
+      override def put(k: K, v: V): Option[(K, V)] = {
+        val i: Int = findIndex((k, v))
+        println(s"the index is $i")
+          array(i).synchronized {
+            if (array(i).isEmpty) {
+              println(s"is it here? $i")
+              array(i) = Some(new Entry {
+                override def value: V = v
+
+                override def key: K = k
+
+                override def index = i
+              })
+
+              Some(k, v)
+            }
+            else
+              None
+          }
+      }
+
+      override def removeKey(k: K): Option[V] =
+        getValue(k).map( v => {
+          val index: Int = findIndex((k, v))
+          array(index).synchronized {
+            array(index) = None
+            v
+          }
+        })
+
+      // Removing value is costly in my implementation
+      override def removeValue(v: V): Option[K] = {
+        var count = 0
+        var key: Option[K] = None
+        array.synchronized {
+          while (array.length == count && key.isEmpty) {
+            if (array(count).isDefined && array(count).get.value == v) {
+              key = Some(array(count).get.key)
+              array(count) = None
+            }
+            count += 1
+          }
+        }
+        key
+      }
+
+      // Get a key based on a value is costly in my implementation
+      def getValue(k: K): Option[V] = {
+        var count = 0
+        var value: Option[V] = None
+        array.synchronized {
+          while (array.length == count && value.isEmpty) {
+            if (array(count).isDefined) {
+              value = Some(array(count).get.value)
+            }
+            count += 1
+          }
+        }
+        value
+      }
+
+      def getKey(v: V): Option[K] = {
+        var count = 0
+        var key: Option[K] = None
+        array.synchronized {
+          while (array.length == count && key.isEmpty) {
+            if (array(count).isDefined && array(count).get.value == v) {
+              key = Some(array(count).get.key)
+            }
+            count += 1
+          }
+        }
+        key
+      }
+
+
+      def size: Int =
+        array.synchronized(array.length)
+
+      def iterator: Iterator[(K, V)] =
+        array.synchronized(array.filter(_.isDefined).iterator.map(_.map(e => (e.key, e.value)).get))
+
+      // Exercise 12
+      override def replace(k1: K, v1: V, k2: K, v2: V): Unit = {
+        val hash = findIndex((k1, v1))
+        val hash2 = findIndex((k2, v2))
+
+        if (hash > hash2) {
+          array(hash).synchronized {
+            array(hash2).synchronized {
+              array(hash) = None
+              array(hash2) = Some(new Entry {
+                override def index: Int = hash2
+
+                override def value: V = v2
+
+                override def key: K = k2
+              })
+            }
+          }
+        }
+      }
+    }
+
+  // Exercise 14
+  // Implement a cache method, which converts any function into a memoized version of itself.
+  // The first time that the resulting function is called for any argument, it is called in the same way as the original function.
+  // However, the result is memoized, and subsequently invoking the resulting function with
+  // the same arguments must return the previously returned value:
+  class Cache[K, V] {
+    val map = new ConcurrentBiMapImpl[K, V]
+    def cache(f: K => V): K => V = {
+      x => {
+        map.getValue(x).getOrElse {
+          val s = f(x)
+          map.put(x, s)
+          s
+        }
+      }
+    }
+  }
+
   // A common function to start a thread
-  private def thread(body: => Unit): Thread = {
+  private[chapter1] def thread(body: => Unit): Thread = {
     val t = new Thread {
       override def run(): Unit = body
     }
